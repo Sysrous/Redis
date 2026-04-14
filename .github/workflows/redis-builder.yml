@@ -1,14 +1,15 @@
 # .github/workflows/redis-builder.yml
 
-name: Build Redis Binaries
+name: Build Redis Binaries (Official Method)
 
 on:
   workflow_dispatch:
     inputs:
       redis_version:
-        description: 'Redis Version to Build'
+        description: 'Redis Version to Build (e.g., 8.4.2)'
         required: true
-        default: '8.6.2'
+        # 默认使用您确认的 8.4.2 版本
+        default: '8.4.2'
   push:
     branches: [ "main" ]
 
@@ -16,9 +17,6 @@ jobs:
   build-and-package:
     name: Build on ${{ matrix.name }}
     strategy:
-      # --- 关键变更 1 ---
-      # 设置为 false, 即使一个任务失败, 其他任务也会继续运行
-      # 这样即便 Ubuntu 24.04 失败, 你依然能拿到其他系统的产物
       fail-fast: false
       matrix:
         include:
@@ -39,53 +37,55 @@ jobs:
     container: ${{ matrix.container }}
 
     steps:
-      - name: Install Build Dependencies
+      - name: Install Build Dependencies (as per Official Docs)
         run: |
-          # 在基于 Debian 的容器中需要运行此命令
-          if [ -f /etc/debian_version ]; then
-            apt-get update -y && apt-get install -y --no-install-recommends \
-            gcc g++ make tcl wget libssl-dev pkg-config ca-certificates
-          fi
-      
-      - name: Install Build Dependencies (for Ubuntu runners)
-        if: ${{ !matrix.container }}
-        run: |
-          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends \
-          gcc g++ make tcl libssl-dev pkg-config ca-certificates
-          
-      - name: Download and Compile Redis
-        run: |
-          REDIS_VERSION=${{ github.event.inputs.redis_version || '8.6.2' }}
-          echo "Building Redis Version: $REDIS_VERSION"
+          set -e
+          apt-get update -y
+          # --- 关键变更 1: 安装所有官方文档推荐的依赖 ---
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            tcl \
+            libssl-dev \
+            libsystemd-dev \
+            pkg-config \
+            wget \
+            unzip \
+            curl \
+            uuid-dev \
+            libjemalloc-dev # Redis 推荐的内存分配器
 
+      - name: Download, Compile, and Package Redis
+        run: |
+          set -e
+          
+          REDIS_VERSION=${{ github.event.inputs.redis_version || '8.4.2' }}
+          echo ">>> Starting build for Redis Version: $REDIS_VERSION"
+
+          echo ">>> Step 1: Downloading source code..."
+          # --- 关键变更 2: 使用更标准的 .tar.gz 格式 ---
           wget "https://github.com/redis/redis/archive/refs/tags/${REDIS_VERSION}.tar.gz" -O redis.tar.gz
-          mkdir -p /tmp/redis-src
+          
+          mkdir -p /tmp/redis-src /tmp/redis-package
+
+          echo ">>> Step 2: Extracting source code..."
           tar -xzf redis.tar.gz -C /tmp/redis-src --strip-components=1
           cd /tmp/redis-src
 
-          # --- 关键变更 2 ---
-          # 使用 MALLOC=libc 可以避免一些内存分配器的兼容性问题
-          # 这是更稳妥的编译方式
-          echo "Compiling Redis..."
-          make MALLOC=libc
-
-          # --- 关键变更 3 ---
-          # 使用 'make install' 是更规范、更不容易出错的安装方式
-          # 它会自动将所有需要的文件放到正确的子目录
-          echo "Installing binaries to a staging directory..."
+          echo ">>> Step 3: Compiling Redis (Official Flags)..."
+          # 确保编译环境干净
+          make distclean
+          # --- 关键变更 3: 使用官方推荐的编译选项 MALLOC=jemalloc ---
+          make BUILD_TLS=yes MALLOC=jemalloc
+          
+          echo ">>> Step 4: Installing to staging directory..."
           make PREFIX=/tmp/redis-package install
           
-          # 将配置文件示例也复制过去
-          cp redis.conf /tmp/redis-package/bin/redis.conf.example
+          echo ">>> Step 5: Packaging binaries..."
+          cd /tmp/redis-package
+          tar -czvf "/github/workspace/redis-${REDIS_VERSION}-binaries-${{ matrix.name }}.tar.gz" .
 
-      - name: Package Binaries
-        run: |
-          # --- 关键变更 4 ---
-          # -C 参数可以确保压缩包内部没有多余的层级
-          tar -czvf "redis-binaries-${{ matrix.name }}.tar.gz" -C /tmp/redis-package .
-          
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: redis-binaries-${{ matrix.name }}
-          path: ./*.tar.gz # 上传当前目录下的 tar.gz 文件
+          path: /github/workspace/redis-*.tar.gz
